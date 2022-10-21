@@ -17,8 +17,9 @@
 {-# LANGUAGE TypeFamilies #-}
 
 {-# OPTIONS_GHC -Wno-partial-fields -Wno-incomplete-record-updates -Wno-orphans #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-module Test.Consensus.Mempool.State where
+module Test.Consensus.Mempool.State (prop) where
 
 import Control.Monad.Trans.Reader
 import Data.IORef
@@ -33,8 +34,7 @@ import Test.QuickCheck
 import Test.QuickCheck.Monadic
 import Test.StateMachine
 import Test.StateMachine.Types (
-  History(..), HistoryEvent(..),
-  ParallelCommandsF(..), ParallelCommands, Command(..), Commands(..), Pair(..))
+  ParallelCommandsF(..), Command(..), Commands(..), Pair(..))
 
 import Cardano.Slotting.Time
 
@@ -44,10 +44,8 @@ import Test.Consensus.Mempool.State.Types
 import Test.Consensus.Mempool.Block
 
 import qualified Data.List.NonEmpty as NE
-import Cardano.Slotting.Slot
-import Data.List (sort, intercalate)
-import Ouroboros.Consensus.Storage.LedgerDB.HD (extendSeqUtxoDiff)
-import Data.Foldable
+import qualified Data.Sequence.NonEmpty as NESeq
+import Data.List (intercalate)
 import Ouroboros.Network.Block (pointSlot)
 import NoThunks.Class
 import GHC.Generics (Generic)
@@ -55,17 +53,19 @@ import Test.Util.TestBlock hiding (TestBlock)
 import Control.Monad.Except (throwError)
 import Ouroboros.Consensus.HardFork.History (defaultEraParams)
 import Ouroboros.Consensus.Config.SecurityParam (SecurityParam(..))
-import qualified Data.Map.Strict as Map
-import qualified Ouroboros.Consensus.Storage.LedgerDB.HD as HD
 import Control.Monad (foldM)
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, isNothing, isJust)
 import qualified Ouroboros.Consensus.Util.MonadSTM.RAWLock as RAWLock
-import Debug.Trace
-import Control.Monad.IO.Class (MonadIO(liftIO))
 
 import Text.Layout.Table
-import Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq
 import Data.List.NonEmpty (NonEmpty)
+import qualified Ouroboros.Consensus.Mempool.TxSeq as TxSeq
+import qualified Data.Set as Set
+import Data.Function (on)
+import Data.Foldable
+import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq as DS
+import qualified Data.Map.Strict as Map
+import Debug.Trace
 
 {-------------------------------------------------------------------------------
   Generation
@@ -80,9 +80,6 @@ genListOfStates firstState = do
 
                                       pure (nextValues, nextValues:acc)) (firstState, []) numStates
   pure $ fromJust $ NE.nonEmpty $ reverse valueChangelog
-
-thd :: (a, b, c) -> c
-thd (_, _, c) = c
 
 generator ::
   ( Arbitrary (GenTx TestBlock)
@@ -111,22 +108,15 @@ generator lcfg = \case
            Nothing -> do
              let anchorSt = NE.head $ modelLedgerDB model
              valueChangelog <- genListOfStates anchorSt
-             pure $ UnsyncTip valueChangelog
+             UnsyncTip valueChangelog <$> arbitrary
            Just nldb -> do
              let anchorSt = NE.head nldb
              valueChangelog <- genListOfStates anchorSt
-             pure $ UnsyncTip valueChangelog
+             UnsyncTip valueChangelog <$> arbitrary
      )
-   , (1, pure UnsyncAnchor)
+--   , (1, pure UnsyncAnchor)
    , (1, pure SyncLedger)
    ]
-   where
-
-     f :: (Ord k, Eq v) => SlotNo -> SeqDiffMK k v -> DiffMK k v -> SeqDiffMK k v
-     f sl (ApplySeqDiffMK sq) (ApplyDiffMK d) = ApplySeqDiffMK $ extend sq sl d
-
-rawForgetValues :: TrackingMK k v -> DiffMK k v
-rawForgetValues (ApplyTrackingMK _ d) = ApplyDiffMK d
 
 -- TODO: @js fill this shrinker
 shrinker :: Model blk Symbolic -> Action blk Symbolic -> [Action blk Symbolic]
@@ -141,7 +131,55 @@ preconditions Model{}   Init{} = Bot
 preconditions Model{}   _      = Top
 
 -- TODO: @js Add postconditions
-postconditions :: p -> p1 -> p2 -> Logic
+postconditions :: forall blk. ( LedgerSupportsMempool blk
+                              , Eq (GenTx blk)
+                              , GetTip (TickedLedgerState blk EmptyMK)) => Model blk Concrete -> Action blk Concrete -> Response blk Concrete -> Logic
+postconditions (Model oldTxs oldSt _ oldLdb _ needSync) (TryAddTxs txs) (RespTryAddTxs resynced st _ added pending removed) = (txs ./= []) .=> (
+      -- No transactions have gone missing
+      forall txs     (flip member (map resultToTx added ++ pending))
+      -- all removed transactions were present in the model
+  .&& forall removed (`member` (map (txForgetValidated . TxSeq.txTicketTx) $ TxSeq.toList oldTxs))
+      -- no removed transactions have been added again
+  .&& (Boolean (not $ null added) .=> forall removed (`notMember` (map resultToTx added)))
+      -- no added transactions were just removed
+  .&& (Boolean (not $ null removed) .=> forall (map resultToTx added) (`notMember` removed))
+      -- The state did not change if we didnt need to resync (only the slot could change)
+  .&& case needSync of
+        Nothing -> Annotate "No need to sync" $ (on (.==) (pointSlot . getTip))
+                   (st    `withLedgerTablesTicked` polyEmptyLedgerTables)
+                   (oldSt `withLedgerTablesTicked` polyEmptyLedgerTables @EmptyMK)
+        Just nextSync ->
+          if resynced
+          then Annotate "Synced and changed state" $ (pointSlot $ getTip $ st               `withLedgerTablesTicked` polyEmptyLedgerTables @EmptyMK)
+               .== (pointSlot $ getTip $ NE.last nextSync `withLedgerTables` polyEmptyLedgerTables @EmptyMK)
+          else Annotate "Synced and not changed state" $ (on (.==) (pointSlot . getTip))
+                   (st    `withLedgerTablesTicked` polyEmptyLedgerTables)
+                   (oldSt `withLedgerTablesTicked` polyEmptyLedgerTables @EmptyMK)
+
+      -- All the new diffs which are deletes are Consumed txins
+  .&& head (foldLedgerTables2 areRequested
+              (projectLedgerTablesTicked st)
+              txIns)
+      )
+  where
+    addedTxs = map resultToTx $ filter (\case
+                                           MempoolTxAddedPlus{} -> True
+                                           _ -> False ) added
+    keptTxs =  [t' | t <- TxSeq.toList oldTxs, let t' = txForgetValidated $ TxSeq.txTicketTx t, t' `notElem` removed]
+
+    txIns :: LedgerTables (LedgerState blk) KeysMK
+
+    txIns = foldl' (zipLedgerTables (<>)) polyEmptyLedgerTables $ map getTransactionKeySets $ addedTxs ++ keptTxs
+    areRequested :: (Eq k, Show k) => DiffMK k v -> KeysMK k v -> [Logic]
+    areRequested (ApplyDiffMK (DS.Diff d)) (ApplyKeysMK (DS.Keys keys)) = forall (map (fst) $ Map.toList $ Map.filterWithKey filterDiffs d) (`member` (Set.toList keys)):[]
+
+    filterDiffs k (DS.MkNEDiffHistory (DS.UnsafeDiffHistory ne)) = not $ null $ NESeq.filter (\case
+                                                                         DS.Delete{} -> True
+                                                                         _ -> False) ne
+
+    forgetValues :: TrackingMK k v -> DiffMK k v
+    forgetValues (ApplyTrackingMK _ d) = ApplyDiffMK d
+
 postconditions _ _ _ = Top
 
 sm :: ( LedgerSupportsMempool TestBlock
@@ -180,20 +218,24 @@ prop_mempoolParallel _ lcfg trc = forAllParallelCommands (sm lcfg trc) Nothing $
             )
             (runParallelCommandsNTimes 100 (sm lcfg trc) cmds >>= prettyParallelCommands cmds)
 
-treeDraw :: Show (cmd Symbolic) => ParallelCommandsF Pair cmd resp -> String
+treeDraw :: ParallelCommandsF Pair (Action TestBlock) (Response TestBlock) -> String
 treeDraw (ParallelCommands prefix suffixes) =
   "\nTEST CASE\nPrefix\n" ++ (unlines $ map ('\t':) $ lines (tableString [def]
     unicodeRoundS
     def
-    (map (\(Command c _ _) -> rowG [head $ words $ show c]) (unCommands prefix))
+    (map (\(Command c _ _) -> rowG [g c]) (unCommands prefix))
   )) ++ "\nParallel suffix\n" ++ (unlines $ map ('\t':) $ lines (tableString [def, def]
     unicodeRoundS
     def
     (map (\(Pair p1 p2) -> rowG [ f p1
                                 , f p2]) suffixes)))
 
-  where f (Commands cs) = intercalate "," $ map (\(Command c _ _) -> head $ words $ show c) cs
+  where
+    f (Commands cs) = intercalate "," $ map (\(Command c _ _) -> g c) cs
+    g (UnsyncTip _ b) = (if b then "UnsyncAnchor," else "") <> "UnsyncTip"
+    g c = head $ words $ show c
 
+{-
 prop_mempoolSequential :: ( LedgerSupportsMempool TestBlock
       , LedgerSupportsProtocol TestBlock
       , HasTxId (GenTx TestBlock)
@@ -214,20 +256,22 @@ prop_mempoolSequential _ lcfg trc = forAllCommands (sm lcfg trc) Nothing $ \cmds
               print res
               putStrLn $ unlines [ head $ words $ show c | (_, Invocation c _)<- hist  ]
               error "STOP")
-
+-}
 
 prop :: Bool -> IO ()
 prop = quickCheck . prop_mempoolParallel (Proxy @TestBlock) (defaultEraParams (SecurityParam 2) (slotLengthFromSec 2))
 
+{-
 prop' :: Bool -> IO ()
 prop' = quickCheck . prop_mempoolSequential (Proxy @TestBlock) (defaultEraParams (SecurityParam 2) (slotLengthFromSec 2))
+-}
 
 instance NoThunks (TickedLedgerState TestBlock TrackingMK)
 
 instance Show (MempoolChangelog TestBlock) where
-  show (MempoolChangelog a tbs) = "MempoolChangelog " <> show a -- <> " " <> showsLedgerState sMapKind tbs ""
+  show (MempoolChangelog a _) = "MempoolChangelog " <> show a -- <> " " <> showsLedgerState sMapKind tbs ""
 instance IsApplyMapKind mk => Show (TickedLedgerState TestBlock mk) where
-  show (TickedTestLedger (TestLedger lap pds) ) = unwords [
+  show (TickedTestLedger (TestLedger lap _) ) = unwords [
     "Ticked"
     , "LedgerState"
     , show lap

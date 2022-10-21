@@ -249,6 +249,9 @@ newTVarBackingStore lookup_ rangeRead_ forwardValues_ enc dec initialization = d
             TVarBackingStoreContentsClosed        ->
               pure $ Exn.throw TVarBackingStoreClosedExn
             TVarBackingStoreContents slot1 values ->
+              if (slot1 > At slot2)
+              then error $ "Wrong slots: at backing store " <> show slot1 <> ", at flushed " <> show slot2
+              else
               Exn.assert (slot1 <= At slot2) $ do
                 IOLike.writeTVar ref $
                   TVarBackingStoreContents

@@ -8,6 +8,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 {-# OPTIONS_GHC -Wno-partial-fields #-}
+{-# LANGUAGE InstanceSigs #-}
 
 module Test.Consensus.Mempool.State.Types (
     -- * Actions
@@ -15,6 +16,7 @@ module Test.Consensus.Mempool.State.Types (
   , Response (..)
     -- * Model
   , MempoolAddTxResultPlus (..)
+  , resultToTx
   , MockLedgerDB
   , Model (..)
   , initModel
@@ -37,6 +39,7 @@ import qualified Ouroboros.Consensus.Mempool.TxSeq as TxSeq
 
 import           Test.StateMachine
 import qualified Test.StateMachine.Types.Rank2 as Rank2
+import qualified Data.List.NonEmpty as NE
 
 {-------------------------------------------------------------------------------
   Actions
@@ -65,6 +68,7 @@ data Action blk (r     :: Type -> Type)
     -- This means @switchToFork@
   | UnsyncTip
       { unsyncStates :: !(NonEmpty (LedgerState blk ValuesMK))
+      , unsyncAnchor :: !Bool
       }
 
     -- | Make the ledger go out of sync moving the anchor forward. I don't care
@@ -77,14 +81,22 @@ data Action blk (r     :: Type -> Type)
   deriving stock Generic1
   deriving anyclass (Rank2.Functor, Rank2.Foldable, Rank2.Traversable, CommandNames)
 
-deriving instance ( Show (LedgerState blk EmptyMK)
+instance ( Show (LedgerState blk EmptyMK)
                   , Show (TickedLedgerState blk DiffMK)
                   , Show (LedgerState blk ValuesMK)
                   , Show (TickedLedgerState blk EmptyMK)
                   , Show (GenTx blk)
                   , Show (LedgerTables (LedgerState blk) DiffMK)
                   , Show (MempoolChangelog blk)
-                  ) => Show (Action blk r)
+                  ) => Show (Action blk r) where
+  show x = case x of
+    Init ls -> "Init " <> show ls
+    TryAddTxs gts -> "TryAddTxs [" <> show (length gts) <> " txs]"
+    SyncLedger -> "SyncLedger"
+    GetSnapshot -> "GetSnapshot"
+    GetSnapshotFor ti lss -> "GetSnapshotFor " <> show ti
+    UnsyncTip ne a -> "UnsyncTip [" <> show (NE.head ne) <> ", "<> show (length ne - 2) <> " states, "<> show (NE.last ne) <> "] flush? " <> show a
+    UnsyncAnchor -> "UnsyncAnchor"
 
 {-------------------------------------------------------------------------------
   Response
@@ -93,6 +105,10 @@ deriving instance ( Show (LedgerState blk EmptyMK)
 data MempoolAddTxResultPlus blk =
     MempoolTxAddedPlus !(TxSeq.TxTicket (Validated (GenTx blk)))
   | MempoolTxRejectedPlus !(GenTx blk)
+
+resultToTx :: LedgerSupportsMempool blk => MempoolAddTxResultPlus blk -> GenTx blk
+resultToTx (MempoolTxAddedPlus t) = txForgetValidated $ TxSeq.txTicketTx t
+resultToTx (MempoolTxRejectedPlus t) = t
 
 deriving instance ( Show (Validated (GenTx blk))
                   , Show (GenTx blk)
@@ -104,6 +120,9 @@ data Response blk (r :: Type -> Type)
 
   | -- | Transactions were pushed onto the mempool
     RespTryAddTxs
+
+      !Bool -- Did the tip change?
+
       !(TickedLedgerState blk DiffMK) -- ^ The resulting ledger state after
                                         -- the transactions (and ticking if a resync was needed)
 
@@ -122,6 +141,7 @@ data Response blk (r :: Type -> Type)
 
   | -- | A Sync with a new state was performed
     SyncOk
+      !(NonEmpty (LedgerState blk ValuesMK))
       !(TickedLedgerState blk DiffMK)   -- ^ The resulting ledger state after syncing
       ![GenTx blk]                      -- ^ The transactions that were dropped
 
@@ -138,10 +158,16 @@ data Response blk (r :: Type -> Type)
   deriving stock (Generic1)
   deriving anyclass Rank2.Foldable
 
-deriving instance ( Show (Validated (GenTx blk))
+instance ( Show (Validated (GenTx blk))
                   , Show (GenTx blk)
                   , Show (TickedLedgerState blk DiffMK)
-                  ) => Show (Response blk r)
+                  , Show (LedgerState blk ValuesMK)
+                  ) => Show (Response blk r) where
+  show ResponseOk = "ResponseOk"
+  show (RespTryAddTxs _ st _ processed pending removed) = "RespTryAdd " <> show st <> ", txs proc:pen:removed " <> show (length processed, length pending, length removed)
+  show (SyncOk _ st removed) = "SyncOk " <> show st <> " txs removed: " <> show (length removed)
+  show (Snapshot _) = "Snapshot"
+  show (SnapshotFor _) = "SnapshotFor"
 
 {-------------------------------------------------------------------------------
   Model

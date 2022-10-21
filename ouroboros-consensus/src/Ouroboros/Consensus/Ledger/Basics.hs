@@ -129,6 +129,7 @@ module Ouroboros.Consensus.Ledger.Basics (
     -- * Exported only for testing
   , rawApplyDiffs
   , rawCalculateDifference
+  , rawForgetValues
   ) where
 
 import qualified Codec.CBOR.Decoding as CBOR
@@ -464,7 +465,7 @@ class ( ShowLedgerState (LedgerTables l)
   foldLedgerTables2 ::
        Monoid m
     => (forall k v.
-           (Ord k, Eq v)
+           (Ord k, Eq v, Show k)
         => mk1 k v
         -> mk2 k v
         -> m

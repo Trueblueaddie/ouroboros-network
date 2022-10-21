@@ -42,12 +42,13 @@ import           Test.Consensus.Mempool.State.Model
 import           Debug.Trace
 import qualified Data.List.NonEmpty as NE
 import Data.Function (on)
+import Data.List.NonEmpty (NonEmpty)
 
 -- | A mock LedgerDB that has the bare minimum to fulfill the LedgerInterface
 data TestLedgerDB m blk =
   TestLedgerDB
     !(LedgerBackingStore m (ExtLedgerState blk))
-    !(StrictTVar m (LedgerState blk EmptyMK, MempoolChangelog blk))
+    !(StrictTVar m (WithOrigin SlotNo, NonEmpty (LedgerState blk ValuesMK))) --(LedgerState blk EmptyMK, MempoolChangelog blk))
 
 newLedgerInterface ::
   ( IOLike m
@@ -61,15 +62,26 @@ newLedgerInterface ::
       )
 newLedgerInterface st = do
   bkst   <- createTVarBackingStore (ExtLedgerStateTables $ projectLedgerTables st)
-  ledger <- newTVarIO (forgetLedgerTables st, MempoolChangelog Origin polyEmptyLedgerTables)
+  ledger <- newTVarIO ((pointSlot $ getTip st), st NE.:| [])
   rw <- RAWLock.new ()
   pure $ ( TestLedgerDB bkst ledger
          , LedgerInterface {
-               getCurrentLedgerAndChangelog = readTVar ledger
+               getCurrentLedgerAndChangelog = do
+                   (s, values) <- readTVar ledger
+                   let projected = [ (slot, projectLedgerTables thisst) | thisst <- NE.toList values, let slot = pointSlot $ getTip thisst, slot > s ]
+                       zipped = zip projected $ tail projected
+                       diffs = foldl'
+                         (\acc ((_, prev), (thisslot, next)) -> zipLedgerTables (ext (withOrigin' thisslot)) acc (zdiff prev next))
+                         polyEmptyLedgerTables
+                         zipped
+                   pure $ (forgetLedgerTables $ NE.last values,) $ MempoolChangelog s diffs
              , getBackingStore              = pure bkst
              , withReadLock                 = \m -> RAWLock.withReadAccess rw (\() -> m)
              }
          , rw)
+
+ext :: (Ord k, Eq v) => SlotNo -> SeqDiffMK k v -> DiffMK k v -> SeqDiffMK k v
+ext sl (ApplySeqDiffMK sq) (ApplyDiffMK d) = ApplySeqDiffMK $ extend sq sl d
 
 semantics ::
   ( LedgerSupportsMempool blk
@@ -104,6 +116,7 @@ semantics cfg trc action = do
       (mp, _, _) <- readIORef ref
       -- Get the transactions before this call
       txsOld <- atomically $ snapshotTxs <$> getSnapshot mp
+      stOrig <- unsafeGetMempoolState mp
       -- Process the transactions
       (processed, pending) <- tryAddTxs mp DoNotIntervene txs
       -- Get the transactions after
@@ -132,23 +145,28 @@ semantics cfg trc action = do
                           ]
       st <- unsafeGetMempoolState mp
       when trc $ traceM $ "END " <> show myId <> " TRYADDTXS"
-      pure $ RespTryAddTxs st (snapshotNextTicket snap) processedPlus pending removed
+      pure $ RespTryAddTxs (pointSlot (getTip stOrig) /= pointSlot (getTip st)) st (snapshotNextTicket snap) processedPlus pending removed
 
     SyncLedger -> do
       when trc $ traceM $ "START " <> show myId <> " SYNCLEDGER"
-      (mp, _, _) <- readIORef ref
+      (mp, TestLedgerDB _ stv, _) <- readIORef ref
       -- Getting the transactions before
+      stOrig <- unsafeGetMempoolState mp
+      (_, states) <- atomically $ readTVar stv
       txs <- atomically $ snapshotTxs <$> getSnapshot mp
       -- Peforming the sync with ledger, which happens to return the resulting snapshot, so we extract the new transactions
       txs' <- map (txForgetValidated . fst) . snapshotTxs <$> syncWithLedger mp
 
       st' <- unsafeGetMempoolState mp
-      -- The difference are the transactions that have been removed
-      when trc $ traceM $ "END " <> show myId <> " SYNCLEDGER"
-      pure $ SyncOk st' [ t' | (t, _) <- txs
+      if pointSlot (getTip stOrig) /= pointSlot (getTip st') then do
+        -- The difference are the transactions that have been removed
+        when trc $ traceM $ "END " <> show myId <> " SYNCLEDGER"
+        pure $ SyncOk states st' [ t' | (t, _) <- txs
                              , let t' = txForgetValidated t
                              , not (elem t' txs')
                              ]
+      else
+        pure ResponseOk
 
     GetSnapshot -> do
       when trc $ traceM $ "START " <> show myId <> " GETSNAP"
@@ -180,41 +198,30 @@ semantics cfg trc action = do
       when trc $ traceM $ "START " <> show myId <> " UnsyncAnchor"
       (_, TestLedgerDB (LedgerBackingStore bs) stv, rwl) <- readIORef ref
       RAWLock.withWriteAccess rwl (\() -> do
-                                      (s, chlog) <- atomically $ readTVar stv
-                                      let split :: (Ord k, Eq v) => SeqDiffMK k v -> (SeqDiffMK k v, SeqDiffMK k v)
-                                          split (ApplySeqDiffMK sq)       = bimap ApplySeqDiffMK ApplySeqDiffMK $ splitlAt 1 sq
-                                          toFlush                         = mapLedgerTables (fst . split) $ mcDifferences chlog
-                                          toKeep                          = mapLedgerTables (snd . split) $ mcDifferences chlog
-                                          getLastSlot :: (Ord k, Eq v) => SeqDiffMK k v -> [Maybe SlotNo]
-                                          getLastSlot (ApplySeqDiffMK sq) = [maxSlot sq]
-                                      case ( head $ foldLedgerTables getLastSlot toFlush
-                                           , head $ foldLedgerTables getLastSlot toKeep
-                                           ) of
-                                            (_, Nothing) -> pure ()
-                                            (Nothing, _) -> error "unreachable"
-                                            (Just v, _) -> do
-                                              let prj :: (Ord k, Eq v) => SeqDiffMK k v -> DiffMK k v
-                                                  prj (ApplySeqDiffMK sq) = ApplyDiffMK $ cumulativeDiff sq
-                                              bsWrite bs v $ mapLedgerTables prj $ ExtLedgerStateTables toFlush
-                                              atomically $ writeTVar stv (s, MempoolChangelog (At v) toKeep)
+                                      (s, states) <- atomically $ readTVar stv
+                                      case states of
+                                        anchor NE.:| theTail@(next:_:_) -> do
+                                          bsWrite bs (withOrigin' $ pointSlot $ getTip next) $ ExtLedgerStateTables $ zipLedgerTables (\a b -> rawForgetValues $ rawCalculateDifference a b) (projectLedgerTables anchor) (projectLedgerTables next)
+                                          atomically $ writeTVar stv (pointSlot $ getTip next, fromJust $ NE.nonEmpty theTail)
+                                        anchor NE.:| next:[] -> pure ()
+                                        _ NE.:| [] -> pure ()
                                       pure ((), ()))
       when trc $ traceM $ "END " <> show myId <> " UnsyncAnchor"
       pure ResponseOk
 
-    UnsyncTip states -> do
+    UnsyncTip states f -> do
       when trc $ traceM $  "START " <> show myId <> " UnsyncTip"
+      when f $ void $ runReaderT (semantics cfg trc UnsyncAnchor) ref
       (_, TestLedgerDB bs stv, _) <- readIORef ref
-      let ext :: (Ord k, Eq v) => SlotNo -> SeqDiffMK k v -> DiffMK k v -> SeqDiffMK k v
-          ext sl (ApplySeqDiffMK sq) (ApplyDiffMK d) = ApplySeqDiffMK $ extend sq sl d
       (sl, vs) <- readValues bs
-      let projected = map (\x -> (pointSlot $ getTip x, projectLedgerTables x)) $ NE.toList states
+      let projected = [ (slot, projectLedgerTables st) | st <- NE.toList states, let slot = pointSlot $ getTip st, slot > sl ]
           zipped = zip ((sl, vs):projected) projected
           diffs = foldl'
                     (\acc ((_, prev), (s, next)) -> zipLedgerTables (ext (withOrigin' s)) acc (zdiff prev next))
                     polyEmptyLedgerTables
                     zipped
-      anch <- atomically $ mcAnchor . snd <$> readTVar stv
-      atomically $ writeTVar stv (forgetLedgerTables $ NE.last states, MempoolChangelog anch diffs)
+      (anch, oldAnchor NE.:| _) <- atomically $ readTVar stv
+      atomically $ writeTVar stv (anch, oldAnchor NE.:| NE.filter ((sl <) . pointSlot . getTip) states)
       when trc $ traceM $  "END " <> show myId <> " UnsyncTip"
       pure ResponseOk
 

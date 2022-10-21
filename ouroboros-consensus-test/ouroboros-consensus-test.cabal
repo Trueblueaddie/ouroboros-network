@@ -184,6 +184,7 @@ test-suite test-consensus
                      , quickcheck-state-machine
                      , strict-stm
                      , unliftio-core
+                     , nonempty-containers
                      , quiet
                      , serialise
                      , sop-core

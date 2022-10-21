@@ -26,6 +26,7 @@ import           Ouroboros.Network.Block
 import           Test.StateMachine
 
 import           Test.Consensus.Mempool.State.Types
+import GHC.Stack (HasCallStack)
 
 {-------------------------------------------------------------------------------
   Model transition
@@ -36,12 +37,13 @@ transitions :: ( IsLedger (LedgerState blk)
                , Show (Action blk r)
                , Show (Response blk r)
                , Eq (GenTx blk)
+               , HasCallStack
                )
             => LedgerConfig blk
- -> Model blk r
- -> Action blk r
- -> Response blk r
- -> Model blk r
+            -> Model blk r
+            -> Action blk r
+            -> Response blk r
+            -> Model blk r
 transitions cfg model cmd resp =
   case (model, cmd, resp) of
     (NeedsInit, Init st, ResponseOk) ->
@@ -57,8 +59,7 @@ transitions cfg model cmd resp =
     (Model _ _ _ _ _ (Just nldb), SyncLedger, ResponseOk) -> model { modelLedgerDB = nldb
                                                                    , modelNextSync = Nothing
                                                                    }
-    (Model _ _ _ _ _ Nothing, SyncLedger, SyncOk _ _)  -> model
-    (Model txs _ _ _ _ (Just nldb), SyncLedger, SyncOk st' removed) ->
+    (Model txs _ _ _ _ _, SyncLedger, SyncOk nldb st' removed) ->
       let txs' = TxSeq.fromList [ t | t <- TxSeq.toList txs, txForgetValidated (txTicketTx t) `notElem` removed ]
           st'' = st' `withLedgerTablesTicked` zfwd (projectLedgerTables $ NE.last nldb) (projectLedgerTablesTicked st')
       in model { modelTxs = txs'
@@ -68,7 +69,7 @@ transitions cfg model cmd resp =
                , modelCapacity = computeMempoolCapacity st'' NoMempoolCapacityBytesOverride
                }
 
-    (Model _ _ _ ldb _ s, TryAddTxs _, RespTryAddTxs st' tk' added _ removed) ->
+    (Model _ _ _ ldb _ s, TryAddTxs _, RespTryAddTxs _ st' tk' added _ removed) ->
       let model' = case s of
                      Nothing -> model { modelState = st'  `withLedgerTablesTicked` zfwd (projectLedgerTables $ NE.last ldb) (projectLedgerTablesTicked st')  }
                      Just nldb
@@ -77,7 +78,7 @@ transitions cfg model cmd resp =
                                 , modelState = st'  `withLedgerTablesTicked` zfwd (projectLedgerTables $ NE.last nldb) (projectLedgerTablesTicked st')
                                 }
                        | otherwise
-                       -> transitions cfg model SyncLedger (SyncOk st' removed)
+                       -> transitions cfg model SyncLedger (SyncOk nldb st' removed)
           txs'   = foldl' (TxSeq.:>) (modelTxs model') [ t | MempoolTxAddedPlus t <- added ]
       in model' { modelTxs = txs'
                 , modelTicket = tk'
@@ -89,16 +90,18 @@ transitions cfg model cmd resp =
     (Model _ _ _ _ _ (Just nldb), UnsyncAnchor, ResponseOk) ->
       let newTables = maybe nldb id $ NE.nonEmpty $ NE.tail nldb
       in model { modelNextSync = Just newTables }
-    (Model _ _ _ ldb _ Nothing, UnsyncTip states, ResponseOk) ->
-      let newTables = NE.head ldb NE.:| NE.toList states
-      in model { modelNextSync = Just newTables }
-    (Model _ _ _ _ _ (Just nldb), UnsyncTip states, ResponseOk) ->
-      let newTables = NE.head nldb NE.:| NE.toList states
-      in model { modelNextSync = Just newTables }
+    (Model _ _ _ _ _ Nothing, UnsyncTip states a, ResponseOk) ->
+      let model'@(Model _ _ _ ldb _ _) = if a then transitions cfg model UnsyncAnchor ResponseOk else model
+          newTables = NE.head ldb NE.:| NE.toList states
+      in model' { modelNextSync = Just newTables }
+    (Model _ _ _ _ _ _, UnsyncTip states a, ResponseOk) ->
+      let model'@(Model _ _ _ _ _ (Just nldb)) = if a then transitions cfg model UnsyncAnchor ResponseOk else model
+          newTables = NE.head nldb NE.:| NE.toList states
+      in model' { modelNextSync = Just newTables }
 
     (Model{}, c, r) -> error $ "unreachable " <> show c <> " " <> show r
 
-mock :: LedgerSupportsMempool blk
+mock :: (LedgerSupportsMempool blk, HasCallStack)
      => LedgerConfig blk
      -> Model blk Symbolic
      -> Action blk Symbolic
@@ -117,22 +120,22 @@ mock cfg model action = case (model, action) of
           ticked               = tickSt cfg slot (NE.last states')
           (applied, processed) = foldTxs' cfg (ticked, []) [ txForgetValidated $ TxSeq.txTicketTx tx | tx <- TxSeq.toList txs ]
           diffed               = forgetLedgerTablesValuesTicked $ calculateDifferenceTicked ticked applied
-      pure $ SyncOk diffed [ tx | MempoolTxRejected tx _ <- processed ]
+      pure $ SyncOk states' diffed [ tx | MempoolTxRejected tx _ <- processed ]
 
   (Model txs st tk ldb cap toSync, TryAddTxs txs') -> do
     resp <- mock cfg model SyncLedger
     let cap' = getMempoolCapacityBytes cap - sum [ txInBlockSize t | t' <- TxSeq.toList txs, let t = txForgetValidated $ txTicketTx t' ]
     case (resp, toSync) of
       (ResponseOk, _) -> do
-        let (tk', st', processed, pending) = foldTxs cfg cap' (tk, st, []) txs'
+        let (tk', st', processed, pending) = foldTxs cfg cap' (succ tk, st, []) txs'
             st'' = st' `withLedgerTablesTicked` zdiff (projectLedgerTables $ NE.last ldb) (projectLedgerTablesTicked st')
-        pure $ RespTryAddTxs st'' tk' processed pending []
-      (SyncOk st' removed, Just states) -> do
+        pure $ RespTryAddTxs False st'' tk' processed pending []
+      (SyncOk states st' removed, _) -> do
         let st'' = st' `withLedgerTablesTicked` zfwd (projectLedgerTables $ NE.last states) (projectLedgerTablesTicked st')
             cap'' = cap' + sum [ txInBlockSize t | t <- removed ]
-            (tk', applied, processed, pending) = foldTxs cfg cap'' (tk, st'', []) txs'
+            (tk', applied, processed, pending) = foldTxs cfg cap'' (succ tk, st'', []) txs'
             diffed = applied `withLedgerTablesTicked` zdiff (projectLedgerTables $ NE.last states) (projectLedgerTablesTicked applied)
-        pure $ RespTryAddTxs diffed tk' processed pending removed
+        pure $ RespTryAddTxs True diffed tk' processed pending removed
       _ -> error "unreachable"
 
   (Model txs _ _ _ _ _, GetSnapshot) ->
