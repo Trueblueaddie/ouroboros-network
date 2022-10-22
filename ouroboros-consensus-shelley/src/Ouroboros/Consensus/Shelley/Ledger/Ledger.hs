@@ -32,6 +32,8 @@ module Ouroboros.Consensus.Shelley.Ledger.Ledger (
   , ShelleyLedgerConfig (..)
   , mkShelleyLedgerConfig
   , shelleyEraParams
+  , shelleyLedgerGenesis
+    -- TODO: Remove
   , shelleyEraParamsNeverHardForks
     -- * Auxiliary
   , ShelleyLedgerEvent (..)
@@ -81,8 +83,8 @@ import           Ouroboros.Consensus.Util.CBOR (decodeWithOrigin,
                      encodeWithOrigin)
 import           Ouroboros.Consensus.Util.Versioned
 
-import qualified Cardano.Ledger.BaseTypes as SL (epochInfoPure)
 import qualified Cardano.Ledger.BHeaderView as SL (BHeaderView)
+import qualified Cardano.Ledger.BaseTypes as SL (epochInfoPure)
 import qualified Cardano.Ledger.Core as Core
 import qualified Cardano.Ledger.Shelley.API as SL
 import qualified Control.State.Transition.Extended as STS
@@ -124,7 +126,9 @@ data ShelleyLedgerConfig era = ShelleyLedgerConfig {
 
 deriving instance ShelleyBasedEra era => NoThunks (ShelleyLedgerConfig era)
 
--- shelleyLedgerGenesis :: ShelleyLedgerConfig era -> SL.ShelleyGenesis era
+-- TODO: Remove
+shelleyLedgerGenesis :: ShelleyLedgerConfig era -> SL.ShelleyGenesis era
+shelleyLedgerGenesis = undefined
 -- shelleyLedgerGenesis = getCompactGenesis . shelleyLedgerCompactGenesis
 
 shelleyEraParams ::

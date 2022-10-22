@@ -97,6 +97,9 @@ instance Crypto c => Serialise (NonMyopicMemberRewards c) where
   encode = toCBOR . unNonMyopicMemberRewards
   decode = NonMyopicMemberRewards <$> fromCBOR
 
+data KESConfig = KESConfig {
+  }
+
 data instance BlockQuery (ShelleyBlock proto era) :: Type -> Type where
   GetLedgerTip :: BlockQuery (ShelleyBlock proto era) (Point (ShelleyBlock proto era))
   GetEpochNo :: BlockQuery (ShelleyBlock proto era) EpochNo
@@ -160,6 +163,9 @@ data instance BlockQuery (ShelleyBlock proto era) :: Type -> Type where
     :: Set (SL.Credential 'SL.Staking (EraCrypto era))
     -> BlockQuery (ShelleyBlock proto era)
              (Delegations (EraCrypto era), SL.RewardAccounts (EraCrypto era))
+
+  GetKESConfig
+    :: BlockQuery (ShelleyBlock proto era) KESConfig
 
   GetGenesisConfig
     :: BlockQuery (ShelleyBlock proto era) (CompactGenesis era)
@@ -269,8 +275,11 @@ instance (ShelleyCompatible proto era, ProtoCrypto proto ~ crypto) => QueryLedge
             answerBlockQuery cfg query' ext
         GetFilteredDelegationsAndRewardAccounts creds ->
           getFilteredDelegationsAndRewardAccounts st creds
-        GetGenesisConfig ->
-          shelleyLedgerCompactGenesis lcfg
+        GetKESConfig ->
+          getKESConfig cfg
+        -- TODO: Remove
+        -- GetGenesisConfig ->
+        --   shelleyLedgerCompactGenesis lcfg
         DebugNewEpochState ->
           st
         DebugChainDepState ->
@@ -534,6 +543,9 @@ querySupportedVersion = \case
 {-------------------------------------------------------------------------------
   Auxiliary
 -------------------------------------------------------------------------------}
+
+getKESConfig :: ExtLedgerCfg (ShelleyBlock proto era) -> KESConfig
+getKESConfig cfg = KESConfig
 
 getProposedPPUpdates ::
      ShelleyBasedEra era
