@@ -7,6 +7,7 @@
 {-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE PolyKinds           #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators       #-}
 
 -- | Miscellaneous utilities
 module Ouroboros.Consensus.Util (
@@ -61,6 +62,9 @@ module Ouroboros.Consensus.Util (
   , (...:)
   , (..:)
   , (.:)
+    -- * Type-level composition
+  , unComp2
+  , (:..:) (..)
     -- * Product
   , pairFst
   , pairSnd
@@ -367,6 +371,17 @@ allDisjoint = go Set.empty
 
 (......:) :: (y -> z) -> (x0 -> x1 -> x2 -> x3 -> x4 -> x5 -> x6 -> y) -> (x0 -> x1 -> x2 -> x3 -> x4 -> x5 -> x6 -> z)
 (f ......: g) x0 x1 x2 x3 x4 x5 x6 = f (g x0 x1 x2 x3 x4 x5 x6)
+
+{-------------------------------------------------------------------------------
+  Type-level composition
+-------------------------------------------------------------------------------}
+
+newtype ((f :: m -> Type) :..: (g :: k -> l -> m)) (p :: k) (r :: l) =
+  Comp2 (f (g p r))
+
+unComp2 :: (f :..: g) p q -> f (g p q)
+unComp2 (Comp2 x) = x
+
 {-------------------------------------------------------------------------------
   Product
 -------------------------------------------------------------------------------}

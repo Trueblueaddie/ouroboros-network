@@ -8,6 +8,7 @@
 {-# LANGUAGE Rank2Types          #-}
 {-# LANGUAGE RecordWildCards     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators       #-}
 
 module Ouroboros.Consensus.Storage.LedgerDB.HD.LMDB (
     DbErr
@@ -51,7 +52,7 @@ import qualified Ouroboros.Consensus.Storage.FS.API as FS
 import qualified Ouroboros.Consensus.Storage.FS.API.Types as FS
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.BackingStore as HD
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq as DS
-import           Ouroboros.Consensus.Util (foldlM')
+import           Ouroboros.Consensus.Util (foldlM', unComp2, (:..:) (..))
 import           Ouroboros.Consensus.Util.IOLike (Exception (..), IOLike,
                      MonadCatch (..), MonadThrow (..), bracket, onException)
 
@@ -332,62 +333,49 @@ getDb ::
   -> LMDB.Transaction mode (LMDBMK k v)
 getDb (NameMK name) = LMDBMK name <$> LMDB.getDatabase (Just name)
 
--- | @'rangeReadFromStart' n db codec@ performs a range read of @count@ values
--- from database @db@, starting from the first key in the database.
+-- | @'rangeRead' n db codec ksMay@ performs a range read of @count@ values from
+-- database @db@, starting from some key depending on @ksMay@.
 --
 -- The @codec@ argument defines how to serialise/deserialise keys and values.
 --
 -- A range read can return less than @count@ values if there are not enough
 -- values to read.
 --
--- Note: See @`RangeQuery`@ for more information about range queries.
-rangeReadFromStart ::
+-- Note: See @`RangeQuery`@ for more information about range queries. In
+-- particular, @'rqPrev'@ describes the role of @ksMay@.
+--
+-- What the "first" key in the database is, and more generally in which order
+-- keys are read, depends on the lexographical ordering of the /serialised/
+-- keys. Care should be taken such that the `Ord` instance for @k@ matches the
+-- lexicographical ordering of the serialised keys, or the result of this
+-- function will be unexpected.
+rangeRead ::
      forall k v mode. Ord k
   => Int
   -> LMDBMK k v
   -> CodecMK k v
+  -> (Maybe :..: KeysMK) k v
   -> LMDB.Transaction mode (ValuesMK k v)
-rangeReadFromStart count (LMDBMK _ db) codecMK =
-    ApplyValuesMK . DS.Values <$>
+rangeRead count dbMK codecMK ksMK =
+    ApplyValuesMK . DS.Values <$> case unComp2 ksMK of
+      Nothing -> runCursorHelper Nothing
+      Just (ApplyKeysMK (DS.Keys ks)) -> case Set.lookupMax ks of
+        Nothing -> pure mempty
+        Just lastExcludedKey ->
+          runCursorHelper $ Just (lastExcludedKey, LMDB.Cursor.Exclusive)
+  where
+    LMDBMK _ db = dbMK
+    CodecMK encKey encVal decKey decVal = codecMK
+
+    runCursorHelper ::
+         Maybe (k, LMDB.Cursor.Bound)    -- ^ Lower bound on read range
+      -> LMDB.Transaction mode (Map k v)
+    runCursorHelper lb =
       LMDB.Cursor.runCursorAsTransaction
         (LMDB.Codec.Codec encKey decKey)
         (LMDB.Codec.Codec encVal decVal)
-        (LMDB.Cursor.cgetMany Nothing count)
+        (LMDB.Cursor.cgetMany lb count)
         db
-  where
-    CodecMK encKey encVal decKey decVal = codecMK
-
--- | @'rangeReadFromKey' n k db codec@ performs a range read of @count@ values
--- from database @db@, starting from key @k@.
---
--- The @codec@ argument defines how to serialise/deserialise keys and values.
---
--- A range read can return less than @count@ values if there are not enough
--- values to read.
---
--- Note: See @`RangeQuery`@ for more information about range queries.
-rangeReadFromKey ::
-     forall k v mode. Ord k
-  => Int
-  -> LMDBMK k v
-  -> CodecMK k v
-  -> KeysMK k v
-  -> LMDB.Transaction mode (ValuesMK k v)
-rangeReadFromKey count (LMDBMK _ db) codecMK ksMK  =
-    ApplyValuesMK . DS.Values <$> case Set.lookupMax ks of
-      Nothing -> pure mempty
-      Just lastExcludedKey ->
-        LMDB.Cursor.runCursorAsTransaction
-          (LMDB.Codec.Codec encKey decKey)
-          (LMDB.Codec.Codec encVal decVal)
-          (LMDB.Cursor.cgetMany
-            (Just (lastExcludedKey, LMDB.Cursor.Exclusive))
-            count
-          )
-          db
-  where
-    ApplyKeysMK (DS.Keys ks) = ksMK
-    CodecMK encKey encVal decKey decVal = codecMK
 
 initLMDBTable ::
      LMDBMK   k v
@@ -767,12 +755,25 @@ mkLMDBBackingStoreValueHandle Db{..} = do
               Nothing -> throwIO DbErrBadRead
               Just x  -> pure x
 
-    bsvhRangeRead :: HD.RangeQuery (LedgerTables l KeysMK) -> m (LedgerTables l ValuesMK)
-    bsvhRangeRead HD.RangeQuery{rqPrev, rqCount} = let
-      transaction = Just <$> case rqPrev of
-        Nothing -> zipLedgerTablesA (rangeReadFromStart rqCount) dbBackingTables codecLedgerTables
-        Just keys -> zipLedgerTables2A (rangeReadFromKey rqCount) dbBackingTables codecLedgerTables keys
-      in vhSubmit vh transaction >>= \case
-        Nothing -> throwIO DbErrBadRangeRead
-        Just x  -> pure x
+    bsvhRangeRead ::
+         HD.RangeQuery (LedgerTables l KeysMK)
+      -> m (LedgerTables l ValuesMK)
+    bsvhRangeRead HD.RangeQuery{rqPrev, rqCount} =
+      let
+        outsideIn ::
+             Maybe (LedgerTables l mk1)
+          -> LedgerTables l (Maybe :..: mk1)
+        outsideIn Nothing       = pureLedgerTables (Comp2 Nothing)
+        outsideIn (Just tables) = mapLedgerTables (Comp2 . Just) tables
+
+        transaction = Just <$>
+          zipLedgerTables2A
+            (rangeRead rqCount)
+            dbBackingTables
+            codecLedgerTables
+            (outsideIn rqPrev)
+      in
+        vhSubmit vh transaction >>= \case
+          Nothing -> throwIO DbErrBadRangeRead
+          Just x  -> pure x
   pure (initSlot, HD.BackingStoreValueHandle{..})
