@@ -116,7 +116,8 @@ data Mock values = Mock {
   , copies        :: [BS.BackingStorePath]
   , isClosed      :: Bool
   , valueHandles  :: Map MockHandle (MockValueReader values)
-  , next          :: MockHandle
+    -- | The next handle to use if a new value handle is opened.
+  , nextHandle    :: MockHandle
   }
   deriving stock (Show, Generic)
 
@@ -139,7 +140,7 @@ emptyMock ops = Mock {
   , copies        = []
   , isClosed      = False
   , valueHandles  = Map.empty
-  , next          = 0
+  , nextHandle    = 0
   }
 
 data MockErr values =
@@ -153,9 +154,11 @@ data MockErr values =
 -- | State within which the mock runs.
 newtype MockState values a =
     MockState (ExceptT (MockErr values) (State (Mock values)) a)
-  deriving stock Functor
-  deriving newtype ( Applicative, Monad
-                   , MonadState (Mock values), MonadError (MockErr values)
+  deriving stock     Functor
+  deriving newtype ( Applicative
+                   , Monad
+                   , MonadState (Mock values)
+                   , MonadError (MockErr values)
                    )
 
 runMockState ::
@@ -221,15 +224,15 @@ mBSValueHandle = do
   mGuardBSClosed
   vs <- gets backingValues
   seqNo <- gets backingSeqNo
-  nxt <- gets next
+  nxtH <- gets nextHandle
   let
     vh = MockValueReader False vs seqNo
   modify (\m -> m {
-      valueHandles = Map.insert nxt vh (valueHandles m)
-    , next = nxt + 1
+      valueHandles = Map.insert nxtH vh (valueHandles m)
+    , nextHandle = nxtH + 1
     })
 
-  pure (seqNo, nxt)
+  pure (seqNo, nxtH)
 
 -- | Write a diff to the backing store.
 mBSWrite ::
@@ -525,9 +528,9 @@ lockstep ::
   -> Resp keys values diff :@ r
   -> Event keys values diff r
 lockstep ops m@(Model _ hs) c (At resp) = Event {
-      before = m
-    , cmd = c
-    , after = Model mock' (hs <> hs')
+      before   = m
+    , cmd      = c
+    , after    = Model mock' (hs <> hs')
     , mockResp = resp'
     }
   where
