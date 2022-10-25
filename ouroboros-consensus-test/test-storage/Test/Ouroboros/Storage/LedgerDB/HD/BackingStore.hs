@@ -65,7 +65,7 @@ import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Ledger.Basics ()
 import           Ouroboros.Consensus.Storage.FS.API hiding (Handle)
 import           Ouroboros.Consensus.Storage.FS.API.Types hiding (Handle)
-import           Ouroboros.Consensus.Storage.FS.IO (monadIOHasFS)
+import           Ouroboros.Consensus.Storage.FS.IO (ioHasFS)
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.BackingStore as BS
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq as DS
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.LMDB as LMDB
@@ -697,7 +697,7 @@ setupBSEnv bss = do
   qsmTmpDir <- liftIO $ createTempDirectory sysTmpDir "BS_QSM"
 
   bsSomeHasFS@(SomeHasFS hasFS) <-
-    pure (SomeHasFS . monadIOHasFS . MountPoint $ qsmTmpDir)
+    pure (SomeHasFS . ioHasFS . MountPoint $ qsmTmpDir)
 
   createDirectory hasFS (mkFsPath ["copies"])
 
