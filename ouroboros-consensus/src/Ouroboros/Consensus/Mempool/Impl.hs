@@ -117,7 +117,7 @@ mkMempool ::
      )
   => MempoolEnv m blk -> Mempool m blk TicketNo
 mkMempool mpEnv = Mempool
-    { tryAddTxs      = implTryAddTxs mpEnv
+    { tryAddTxs      = \wti txs -> (\(a, b, _) -> (a,b)) <$> implTryAddTxs mpEnv wti txs
     , removeTxs      = implRemoveTxs mpEnv
     , syncWithLedger = implSyncWithLedger mpEnv
     , getSnapshot    = implSnapshotFromIS <$> readTMVar istate
@@ -125,6 +125,7 @@ mkMempool mpEnv = Mempool
     , getCapacity    = isCapacity <$> readTMVar istate
     , getTxSize      = txSize
     , unsafeGetMempoolState = isLedgerState <$> atomically (readTMVar istate)
+    , tryAddTxs'     = implTryAddTxs mpEnv
     }
   where
     MempoolEnv {
@@ -272,9 +273,9 @@ implTryAddTxs
   => MempoolEnv m blk
   -> WhetherToIntervene
   -> [GenTx blk]
-  -> m ([MempoolAddTxResult blk], [GenTx blk])
+  -> m ([MempoolAddTxResult blk], [GenTx blk], InternalState blk)
 implTryAddTxs mpEnv wti =
-    go []
+    go ([], Nothing)
   where
     MempoolEnv {
         mpEnvLedgerCfg = cfg
@@ -284,31 +285,35 @@ implTryAddTxs mpEnv wti =
       } = mpEnv
 
     -- MAYBE batch transaction keys queries
-    go :: [MempoolAddTxResult blk]
+    go :: ([MempoolAddTxResult blk], Maybe (InternalState blk))
        -> [GenTx blk]
-       -> m ([MempoolAddTxResult blk], [GenTx blk])
+       -> m ([MempoolAddTxResult blk], [GenTx blk], InternalState blk)
     go acc = \case
-      []         -> pure (reverse acc, [])
+      []         -> pure (reverse $ fst acc, [], case snd acc of
+                             Nothing -> error "implTryAddTxs called without any transactions to add?"
+                             Just v -> v
+                         )
       txs@(tx:next) -> do
         is <- atomically $ takeTMVar istate
 
-        let err :: m ([MempoolAddTxResult blk], [GenTx blk])
+        let err :: m ([MempoolAddTxResult blk], [GenTx blk], InternalState blk)
             err = do
               -- forwarding failed because the changelog anchor changed compared
               -- to the one in the internal state.
               atomically $ putTMVar istate is
-              void $ implSyncWithLedger mpEnv
-              go acc txs
-            ok :: LedgerTables (LedgerState blk) ValuesMK -> m ([MempoolAddTxResult blk], [GenTx blk])
+              snap <- implSyncWithLedger mpEnv
+              go (fst acc, Just undefined) txs
+            ok :: LedgerTables (LedgerState blk) ValuesMK -> m ([MempoolAddTxResult blk], [GenTx blk], InternalState blk)
             ok = \values ->
               case pureTryAddTxs cfg txSize wti tx is values of
                 NoSpaceLeft             -> do
                   atomically $ putTMVar istate is
-                  pure (reverse acc, txs)
+                  pure (reverse $ fst acc, txs, is)
                 TryAddTxs is' result ev -> do
-                  atomically $ putTMVar istate $ fromMaybe is is'
+                  let is'' = fromMaybe is is'
+                  atomically $ putTMVar istate is''
                   traceWith trcr ev
-                  go (result:acc) next
+                  go (result: fst acc, Just is'') next
         fullForward mpEnv (isDbChangelog is) [tx] (const err) ok
 
 implSyncWithLedger ::
@@ -411,15 +416,15 @@ implGetSnapshotFor ::
      , HasTxId (GenTx blk)
      )
   => MempoolEnv m blk
-  -> SlotNo
   -> TickedLedgerState blk DiffMK
   -> MempoolChangelog blk
   -> m (Maybe (MempoolSnapshot blk TicketNo))
-implGetSnapshotFor mpEnv !slot ticked mempoolCh = do
+implGetSnapshotFor mpEnv ticked mempoolCh = do
+  let slot = pointSlot $ getTip ticked
   res <- atomically $ do
     is <- readTMVar istate
     if   isTip    is == castHash (getTipHash ticked)
-      && isSlotNo is == slot
+      && withOrigin False (isSlotNo is ==) slot
       then do
         -- We are looking for a snapshot exactly for the ledger state we already
         -- have cached, then just return it.
@@ -435,7 +440,7 @@ implGetSnapshotFor mpEnv !slot ticked mempoolCh = do
                ( const $ pure Nothing )
                ( pure
                . Just
-               . pureGetSnapshotFor cfg capacityOverride is (ForgeInKnownSlot slot ticked)
+               . pureGetSnapshotFor cfg capacityOverride is (ForgeInKnownSlot (withOrigin undefined id slot) ticked)
                )
   where
     MempoolEnv { mpEnvStateVar         = istate

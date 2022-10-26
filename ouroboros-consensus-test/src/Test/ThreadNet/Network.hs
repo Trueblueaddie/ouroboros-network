@@ -139,6 +139,8 @@ import qualified Test.Util.HardFork.OracularClock as OracularClock
 import           Test.Util.Slots (NumSlots (..))
 import           Test.Util.Time
 import           Test.Util.Tracer
+import qualified Ouroboros.Consensus.Mempool.TxSeq as TxSeq
+import Ouroboros.Consensus.Mempool.TxSeq (TxTicket(txTicketNo))
 
 -- | How to forge an EBB
 --
@@ -631,7 +633,7 @@ runThreadNetwork systemTime ThreadNetworkArgs
                 -- a new tx (e.g. added by TxSubmission) might render a crucial
                 -- transaction valid
                 mempChanged = do
-                  let getMemp = (map snd . snapshotTxs) <$> getSnapshot mempool
+                  let getMemp = (map txTicketNo . TxSeq.toList . snapshotTxs) <$> getSnapshot mempool
                   (mempFp', _) <- atomically $ blockUntilChanged id mempFp getMemp
                   pure (slot, ledger, mempFp')
 

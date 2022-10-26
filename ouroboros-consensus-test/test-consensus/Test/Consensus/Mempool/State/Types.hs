@@ -9,6 +9,8 @@
 
 {-# OPTIONS_GHC -Wno-partial-fields #-}
 {-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE StandaloneKindSignatures #-}
+{-# LANGUAGE GADTs #-}
 
 module Test.Consensus.Mempool.State.Types (
     -- * Actions
@@ -44,12 +46,19 @@ import qualified Data.List.NonEmpty as NE
 {-------------------------------------------------------------------------------
   Actions
 -------------------------------------------------------------------------------}
-data Action blk (r     :: Type -> Type)
+
+type Action :: Type -> (Type -> Type) -> Type
+data Action blk r
     -- | Initialize the mempool and mock ledger DB with this state
-  = Init { stateForInit :: !(LedgerState blk ValuesMK) }
+  = Init {
+      -- | The initial state that will be the first block in the LedgerDB.
+      -- Models what was loaded from a snapshot when starting the node.
+      stateForInit :: !(LedgerState blk ValuesMK) }
 
     -- | Try to add the given transactions into the mempool
-  | TryAddTxs { txsToAdd :: ![GenTx blk] }
+  | TryAddTxs {
+      -- | A list of transactions to add.
+      txsToAdd :: ![GenTx blk] }
 
     -- | Perform a sync with the mock ledger DB
   | SyncLedger
@@ -59,113 +68,140 @@ data Action blk (r     :: Type -> Type)
 
     -- | Request a snapshot for a specific ledger state
   | GetSnapshotFor
-      { snapshotState     :: !(TickedLedgerState blk DiffMK),
-        snapshotChangelog :: ![LedgerState blk ValuesMK]
+      {
+      -- | The previous states as the SUT requires a mempool changelog.
+      snapshotChangelog :: !(NonEmpty (LedgerState blk ValuesMK))
       }
 
-    -- | Make the ledger go out of sync with the mempool by giving a new tip + diffs
+    -- | Make the ledger go out of sync with the mempool by giving a new fork
     --
     -- This means @switchToFork@
-  | UnsyncTip
-      { unsyncStates :: !(NonEmpty (LedgerState blk ValuesMK))
-      , unsyncAnchor :: !Bool
-      }
+  | Switch ![LedgerState blk ValuesMK]
 
-    -- | Make the ledger go out of sync moving the anchor forward. I don't care
-    -- that it moves one or many, as long as it moves, so it will always move
-    -- one.
-    --
-    -- This means @flush@
-  | UnsyncAnchor
+    -- | Flush one state to the disk.
+  | Flush
 
   deriving stock Generic1
-  deriving anyclass (Rank2.Functor, Rank2.Foldable, Rank2.Traversable, CommandNames)
+  deriving anyclass (Rank2.Functor, Rank2.Foldable, Rank2.Traversable)
+
+instance CommandNames (Action blk) where
+  cmdName Init{}           = "Init"
+  cmdName TryAddTxs{}      = "TryAddTxs"
+  cmdName SyncLedger{}     = "SyncLedger"
+  cmdName GetSnapshot{}    = "GetSnapshot"
+  cmdName GetSnapshotFor{} = "GetSnapshotFor"
+  cmdName Switch{}         = "Switch"
+  cmdName Flush{}          = "Flush"
+
+  cmdNames _ = [ "Init"
+               , "TryAddTxs"
+               , "SyncLedger"
+               , "GetSnapshot"
+               , "GetSnapshotFor"
+               , "Switch"
+               , "Flush"
+               ]
 
 instance ( Show (LedgerState blk EmptyMK)
-                  , Show (TickedLedgerState blk DiffMK)
-                  , Show (LedgerState blk ValuesMK)
-                  , Show (TickedLedgerState blk EmptyMK)
-                  , Show (GenTx blk)
-                  , Show (LedgerTables (LedgerState blk) DiffMK)
-                  , Show (MempoolChangelog blk)
-                  ) => Show (Action blk r) where
+         , Show (TickedLedgerState blk TrackingMK)
+         , Show (LedgerState blk ValuesMK)
+         , Show (TickedLedgerState blk EmptyMK)
+         , Show (GenTx blk)
+         , Show (LedgerTables (LedgerState blk) DiffMK)
+         , Show (MempoolChangelog blk)
+         ) => Show (Action blk r) where
   show x = case x of
-    Init ls -> "Init " <> show ls
-    TryAddTxs gts -> "TryAddTxs [" <> show (length gts) <> " txs]"
-    SyncLedger -> "SyncLedger"
-    GetSnapshot -> "GetSnapshot"
-    GetSnapshotFor ti lss -> "GetSnapshotFor " <> show ti
-    UnsyncTip ne a -> "UnsyncTip [" <> show (NE.head ne) <> ", "<> show (length ne - 2) <> " states, "<> show (NE.last ne) <> "] flush? " <> show a
-    UnsyncAnchor -> "UnsyncAnchor"
+    Init ls             -> "Init " <> show ls
+    TryAddTxs gts       -> "TryAddTxs [" <> show (length gts) <> " txs]"
+    SyncLedger          -> "SyncLedger"
+    GetSnapshot         -> "GetSnapshot"
+    GetSnapshotFor _ -> "GetSnapshotFor "
+    Flush               -> "Flush"
+    Switch sts          -> "Switch to ["
+                           <> (maybe "Empty" (\ne -> show (NE.head ne)
+                                                     <> ", "
+                                                     <> show (length ne - 2)
+                                                     <> " states, "
+                                                     <> show (NE.last ne)) . NE.nonEmpty) sts
+                           <> "] "
+
 
 {-------------------------------------------------------------------------------
   Response
 -------------------------------------------------------------------------------}
 
 data MempoolAddTxResultPlus blk =
-    MempoolTxAddedPlus !(TxSeq.TxTicket (Validated (GenTx blk)))
+    MempoolTxAddedPlus    !(TxSeq.TxTicket (Validated (GenTx blk)))
   | MempoolTxRejectedPlus !(GenTx blk)
 
 resultToTx :: LedgerSupportsMempool blk => MempoolAddTxResultPlus blk -> GenTx blk
-resultToTx (MempoolTxAddedPlus t) = txForgetValidated $ TxSeq.txTicketTx t
+resultToTx (MempoolTxAddedPlus t)    = txForgetValidated $ TxSeq.txTicketTx t
 resultToTx (MempoolTxRejectedPlus t) = t
 
 deriving instance ( Show (Validated (GenTx blk))
                   , Show (GenTx blk)
                   ) => Show (MempoolAddTxResultPlus blk)
 
-data Response blk (r :: Type -> Type)
+type Response :: Type -> (Type -> Type) -> Type
+data Response blk r
  = -- | There's nothing to tell
     ResponseOk
 
   | -- | Transactions were pushed onto the mempool
-    RespTryAddTxs
+    RespTryAddTxs {
 
-      !Bool -- Did the tip change?
+        -- | The resulting ledger state after the transactions (and ticking if a
+        -- resync was needed)
+        addTxsResult :: !(TickedLedgerState blk DiffMK)
 
-      !(TickedLedgerState blk DiffMK) -- ^ The resulting ledger state after
-                                        -- the transactions (and ticking if a resync was needed)
+      , addTxsUsedValues :: !(LedgerTables (LedgerState blk) ValuesMK)
 
-      !TicketNo                         -- ^ The last ticket number
+      , -- | The list of results of processing the transactions Notice that the
+        -- system gathers these while executing each transaction. It can be the
+        -- case that a transaction is added, then the mempool is revalidated and
+        -- that same transaction is removed, so we must not blindly assume that
+        -- this transaction was in fact added to the mempool.
+        addTxsProcessed_ :: ![MempoolAddTxResult blk]
 
-      ![MempoolAddTxResultPlus blk]     -- ^ The list of results of processing
-                                        -- the transactions
+      , -- | The transactions that were not included because the mempool was full
+        addTxsPending_ :: ![GenTx blk]
 
-      ![GenTx blk]                      -- ^ The list of transactions that
-                                        -- couldn't be processed because of lack
-                                        -- of space in the mempool
-
-      ![GenTx blk]                      -- ^ If this had to trigger a resync,
-                                        -- then these are the txs that were
-                                        -- dropped by the resync
+      , addTxsCurrentTxs :: !(TxSeq.TxSeq (Validated (GenTx blk)))
+      }
 
   | -- | A Sync with a new state was performed
-    SyncOk
-      !(NonEmpty (LedgerState blk ValuesMK))
-      !(TickedLedgerState blk DiffMK)   -- ^ The resulting ledger state after syncing
-      ![GenTx blk]                      -- ^ The transactions that were dropped
+    SyncOk {
+          syncValuesUsed :: !(LedgerTables (LedgerState blk) ValuesMK)
+        , syncNewTip     :: !(TickedLedgerState blk DiffMK)
+        , syncNewTxs     :: !(TxSeq.TxSeq (Validated (GenTx blk)))
+        , syncRemoveTxs_ :: ![GenTx blk]
+        }
 
   | -- | A snapshot was taken
-    Snapshot
-      ![(Validated (GenTx blk), TicketNo)] -- ^ The transactions in the snapshot
+    Snapshot {
+        -- | The transactions in the snapshot
+        snapshot_ :: !(MempoolSnapshot blk TicketNo)
+      }
 
   | -- | A snapshot for a specific state was requested
-    SnapshotFor
-      !(Maybe [Validated (GenTx blk)]) -- ^ Nothing if the query fails,
-                                       -- otherwise the list of valid
-                                       -- transactions for the given ledger
-                                       -- state
+    SnapshotFor {
+      -- | Nothing if the query fails, otherwise the list of valid transactions
+      -- for the given ledger state
+      snapshotFor_ :: !(Maybe (MempoolSnapshot blk TicketNo))
+      }
+
   deriving stock (Generic1)
   deriving anyclass Rank2.Foldable
 
 instance ( Show (Validated (GenTx blk))
                   , Show (GenTx blk)
                   , Show (TickedLedgerState blk DiffMK)
+                  , Show (TickedLedgerState blk ValuesMK)
                   , Show (LedgerState blk ValuesMK)
                   ) => Show (Response blk r) where
   show ResponseOk = "ResponseOk"
-  show (RespTryAddTxs _ st _ processed pending removed) = "RespTryAdd " <> show st <> ", txs proc:pen:removed " <> show (length processed, length pending, length removed)
-  show (SyncOk _ st removed) = "SyncOk " <> show st <> " txs removed: " <> show (length removed)
+  show (RespTryAddTxs st _ processed pending _) = "RespTryAdd " <> show st <> ", txs proc:pen:removed " <> show (length processed, length pending)
+  show (SyncOk _ st _ removed) = "SyncOk " <> show st <> " txs removed: " <> show (length removed)
   show (Snapshot _) = "Snapshot"
   show (SnapshotFor _) = "SnapshotFor"
 
@@ -187,30 +223,26 @@ instance ( Show (Validated (GenTx blk))
 --  * sorted (NE.map fst mockTables)
 type MockLedgerDB blk          = NonEmpty (LedgerState blk ValuesMK)
 
-data Model blk (r :: Type -> Type) =
-    -- | The model is yet to be initialized
-    NeedsInit
-  | -- | The model is initialized
-    Model
-      { -- | The current sequence of validated transactions
-        modelTxs  :: !(TxSeq (Validated (GenTx blk)))
+type Model :: Type -> (Type -> Type) -> Type
+data Model blk r where
+  -- | The model is yet to be initialized
+  NeedsInit :: Model blk r
+  -- | The model is initialized
+  Model :: {
 
-        -- | The ledger state after applying all the transactions
-      , modelState :: !(TickedLedgerState blk ValuesMK)
+      -- | The current sequence of validated transactions
+      modelTxs       :: !(TxSeq (Validated (GenTx blk)))
 
-        -- | The next ticket number [need ref]
-      , modelTicket :: !TicketNo
+      -- | Was the last command an Unsync? makes sure that we don't run unsyncs
+      -- in parallel. Intended to be used /ONLY/ during command generation
+    , modelIsUnsyncing :: !Bool
 
-        -- | A mocking backing store
-      , modelLedgerDB :: !(MockLedgerDB blk)
+    , modelIsUnsynced :: !Bool
 
-      , modelCapacity :: !MempoolCapacityBytes
-        -- | This might hols a new LedgerDB if we have to resync. Further
-        -- unsyncs will modify this value.
-      , modelNextSync :: !(Maybe (MockLedgerDB blk))
-      } deriving (Generic)
+    , modelState      :: !(NonEmpty (LedgerState blk ValuesMK))
 
-
+    } -> Model blk r
+  deriving Generic
 
 deriving instance ( Eq (TickedLedgerState blk ValuesMK)
                   , Eq (LedgerState blk ValuesMK)

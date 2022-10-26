@@ -591,7 +591,7 @@ deriving instance ( Show (GenTx blk)
 data MempoolSnapshot blk idx = MempoolSnapshot {
     -- | Get all transactions (oldest to newest) in the mempool snapshot along
     -- with their ticket number.
-    snapshotTxs         :: [(Validated (GenTx blk), idx)]
+    snapshotTxs         :: TxSeq (Validated (GenTx blk))
 
     -- | Get all transactions (oldest to newest) in the mempool snapshot,
     -- along with their ticket number, which are associated with a ticket

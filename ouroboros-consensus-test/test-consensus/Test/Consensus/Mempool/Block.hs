@@ -25,6 +25,8 @@
 {-# LANGUAGE UndecidableInstances       #-}
 -- |
 
+{-# OPTIONS_GHC -Wno-orphans -Wno-missing-export-lists #-}
+
 module Test.Consensus.Mempool.Block where
 
 
@@ -50,14 +52,11 @@ import           Test.StateMachine
 import           Cardano.Binary (FromCBOR (..), ToCBOR (..))
 
 import           Ouroboros.Consensus.Block
-import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Ledger.Extended
 import           Ouroboros.Consensus.Util.IOLike
 
-import qualified Ouroboros.Consensus.Storage.LedgerDB.HD as HD
 import qualified Ouroboros.Consensus.Storage.LedgerDB.HD.DiffSeq as DS
-import           Ouroboros.Consensus.Storage.LedgerDB.InMemory
 import           Test.Util.TestBlock hiding (TestBlock, TestBlockCodecConfig,
                      TestBlockStorageConfig)
 
@@ -65,7 +64,6 @@ import Ouroboros.Network.Block
 import Cardano.Slotting.Slot
 import Ouroboros.Network.Point
 
-import NoThunks.Class
 import qualified Data.List.NonEmpty as NE
 
 {-------------------------------------------------------------------------------
@@ -360,7 +358,14 @@ initialState = TestLedger (Point Origin) <$> initialPDS
 
 nextRandomState :: LedgerState TestBlock ValuesMK -> Gen (LedgerState TestBlock ValuesMK)
 nextRandomState (TestLedger lap pds) = do
-  let sl = SlotNo $ withOrigin 1 ((+1) . unSlotNo) (pointSlot lap) :: SlotNo
+  let sl = SlotNo $ withOrigin 1 ((+1) . unSlotNo) (pointSlot lap)
+  -- Use a fixed testhash, we don't care about it
+  let lap' = Point (At (Block sl (TestHash $ 0 NE.:| [])))
+  TestLedger lap' <$> nextPDS pds
+
+randomState :: LedgerState TestBlock ValuesMK -> Gen (LedgerState TestBlock ValuesMK)
+randomState (TestLedger lap pds) = do
+  sl <- SlotNo <$> arbitrary `suchThat` (\x -> x > withOrigin 1 unSlotNo (pointSlot lap))
   -- Use a fixed testhash, we don't care about it
   let lap' = Point (At (Block sl (TestHash $ 0 NE.:| [])))
   TestLedger lap' <$> nextPDS pds

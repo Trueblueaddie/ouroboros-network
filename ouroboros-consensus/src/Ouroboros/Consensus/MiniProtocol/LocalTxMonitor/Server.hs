@@ -41,7 +41,7 @@ localTxMonitorServer mempool =
       :: (MempoolCapacityBytes, MempoolSnapshot blk idx)
       -> ServerStAcquiring (GenTxId blk) (GenTx blk) SlotNo m ()
     serverStAcquiring s@(_, snapshot) =
-      SendMsgAcquired (snapshotSlotNo snapshot) (serverStAcquired s (snapshotTxs snapshot))
+      SendMsgAcquired (snapshotSlotNo snapshot) (serverStAcquired s (undefined $ snapshotTxs snapshot))
 
     serverStAcquired
       :: (MempoolCapacityBytes, MempoolSnapshot blk idx)
@@ -80,6 +80,7 @@ localTxMonitorServer mempool =
       -> MempoolSnapshot blk idx
       -> Bool
     isSameSnapshot a b =
-      (snd <$> snapshotTxs a) == (snd <$> snapshotTxs b)
+      True
+--      (snd <$> snapshotTxs a) == (snd <$> snapshotTxs b)
       &&
       snapshotSlotNo a == snapshotSlotNo b

@@ -38,6 +38,7 @@ import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Ledger.SupportsMempool
 import           Ouroboros.Consensus.Mempool.Impl.Types
 import           Ouroboros.Consensus.Util.IOLike
+import Ouroboros.Consensus.Mempool.TxSeq (TxSeq)
 
 {-------------------------------------------------------------------------------
   Mempool API
@@ -146,6 +147,13 @@ data Mempool m blk idx = Mempool {
                           , [GenTx blk]
                           )
 
+    , tryAddTxs'      :: WhetherToIntervene
+                     -> [GenTx blk]
+                     -> m ( [MempoolAddTxResult blk]
+                          , [GenTx blk]
+                          , InternalState blk
+                          )
+
       -- | Manually remove the given transactions from the mempool.
     , removeTxs      :: NE.NonEmpty (GenTxId blk) -> m ()
 
@@ -179,8 +187,7 @@ data Mempool m blk idx = Mempool {
       -- This does not update the internal state of the mempool.
       --
     , getSnapshotFor ::
-           SlotNo
-        -> TickedLedgerState blk DiffMK
+           TickedLedgerState blk DiffMK
         -> MempoolChangelog blk
         -> m (Maybe (MempoolSnapshot blk idx))
 

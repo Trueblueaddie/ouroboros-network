@@ -45,13 +45,13 @@ import           Ouroboros.Consensus.BlockchainTime
 import           Ouroboros.Consensus.Config.SecurityParam
 import qualified Ouroboros.Consensus.HardFork.History as HardFork
 import           Ouroboros.Consensus.Ledger.Abstract
-import           Ouroboros.Consensus.Ledger.SupportsMempool
 import           Ouroboros.Consensus.Mempool
 import           Ouroboros.Consensus.Mempool.TxSeq as TxSeq
 import           Ouroboros.Consensus.Mock.Ledger hiding (TxId)
 import           Ouroboros.Consensus.Node.ProtocolInfo (NumCoreNodes (..))
 import           Ouroboros.Consensus.Protocol.BFT
 import           Ouroboros.Consensus.Storage.LedgerDB.HD.BackingStore
+import           Ouroboros.Consensus.Ledger.SupportsMempool as SM
 import           Ouroboros.Consensus.Storage.LedgerDB.OnDisk
                      (LedgerBackingStore (LedgerBackingStore))
 import           Ouroboros.Consensus.Util (repeatedly, repeatedlyM,
@@ -89,13 +89,16 @@ tests = testGroup "Mempool"
   Mempool Implementation Properties
 -------------------------------------------------------------------------------}
 
+snapshotTxs' :: MempoolSnapshot blk idx -> [(SM.Validated (SM.GenTx blk), TicketNo)]
+snapshotTxs' is = [ (txTicketTx t, txTicketNo t) | t <- TxSeq.toList $ snapshotTxs is ]
+
 -- | Test that @snapshotTxs == snapshotTxsAfter zeroTicketNo@.
 prop_Mempool_snapshotTxs_snapshotTxsAfter :: TestSetup -> Property
 prop_Mempool_snapshotTxs_snapshotTxsAfter setup =
     withTestMempool setup $ \TestMempool { mempool } -> do
       let Mempool { getSnapshot } = mempool
-      MempoolSnapshot { snapshotTxs, snapshotTxsAfter} <- atomically getSnapshot
-      return $ snapshotTxs === snapshotTxsAfter zeroTicketNo
+      snap@MempoolSnapshot {snapshotTxsAfter} <- atomically getSnapshot
+      return $ snapshotTxs' snap === snapshotTxsAfter zeroTicketNo
 
 -- | Test that all valid transactions added to a 'Mempool' can be retrieved
 -- afterward.
@@ -103,9 +106,9 @@ prop_Mempool_addTxs_getTxs :: TestSetupWithTxs -> Property
 prop_Mempool_addTxs_getTxs setup =
     withTestMempool (testSetup setup) $ \TestMempool { mempool } -> do
       _ <- addTxs mempool (allTxs setup)
-      MempoolSnapshot { snapshotTxs } <- atomically $ getSnapshot mempool
+      snap <- atomically $ getSnapshot mempool
       return $ counterexample (ppTxs (txs setup)) $
-        validTxs setup `isSuffixOf` map (txForgetValidated . fst) snapshotTxs
+        validTxs setup `isSuffixOf` map (txForgetValidated . fst) (snapshotTxs' snap)
 
 -- | Test that both adding the transactions one by one and adding them in one go
 -- produce the same result.
@@ -122,7 +125,7 @@ prop_Mempool_semigroup_addTxs setup =
     return $ counterexample
       ("Transactions after adding in one go: " <> show (snapshotTxs snapshot1)
        <> "\nTransactions after adding one by one: " <> show (snapshotTxs snapshot2)) $
-        snapshotTxs snapshot1 === snapshotTxs snapshot2 .&&.
+        snapshotTxs' snapshot1 === snapshotTxs' snapshot2 .&&.
         snapshotMempoolSize snapshot1 === snapshotMempoolSize snapshot2 .&&.
         snapshotSlotNo snapshot1 === snapshotSlotNo snapshot1
 
@@ -144,10 +147,10 @@ prop_Mempool_addTxs_result setup =
 prop_Mempool_InvalidTxsNeverAdded :: TestSetupWithTxs -> Property
 prop_Mempool_InvalidTxsNeverAdded setup =
     withTestMempool (testSetup setup) $ \TestMempool { mempool } -> do
-      txsInMempoolBefore <- map fst . snapshotTxs <$>
+      txsInMempoolBefore <- map fst . snapshotTxs' <$>
         atomically (getSnapshot mempool)
       _ <- addTxs mempool (allTxs setup)
-      txsInMempoolAfter <- map fst . snapshotTxs <$>
+      txsInMempoolAfter <- map fst . snapshotTxs' <$>
         atomically (getSnapshot mempool)
       return $ counterexample (ppTxs (txs setup)) $ conjoin
         -- Check for each transaction in the mempool (ignoring those already
@@ -167,7 +170,7 @@ prop_Mempool_removeTxs (TestSetupWithTxInMempool testSetup txToRemove) =
     withTestMempool testSetup $ \TestMempool { mempool } -> do
       let Mempool { removeTxs, getSnapshot } = mempool
       removeTxs $ NE.fromList [txId txToRemove]
-      txsInMempoolAfter <- map fst . snapshotTxs <$> atomically getSnapshot
+      txsInMempoolAfter <- map fst . snapshotTxs' <$> atomically getSnapshot
       return $ counterexample
         ("Transactions in the mempool after removing (" <>
          show txToRemove <> "): " <> show txsInMempoolAfter)
@@ -188,7 +191,7 @@ prop_Mempool_semigroup_removeTxs (TestSetupWithTxsInMempoolToRemove testSetup tx
     return $ counterexample
       ("Transactions after removing in one go: " <> show (snapshotTxs snapshot1)
        <> "\nTransactions after removing one by one: " <> show (snapshotTxs snapshot2)) $
-        snapshotTxs snapshot1 === snapshotTxs snapshot2 .&&.
+        snapshotTxs' snapshot1 === snapshotTxs' snapshot2 .&&.
         snapshotMempoolSize snapshot1 === snapshotMempoolSize snapshot2 .&&.
         snapshotSlotNo snapshot1 === snapshotSlotNo snapshot1
 
@@ -303,10 +306,10 @@ prop_Mempool_TraceRemovedTxs :: TestSetup -> Property
 prop_Mempool_TraceRemovedTxs setup =
     withTestMempool setup $ \testMempool -> do
       let TestMempool { mempool, getTraceEvents, addTxsToLedger, getCurrentLedger } = testMempool
-      MempoolSnapshot { snapshotTxs } <- atomically $ getSnapshot mempool
+      snap <- atomically $ getSnapshot mempool
       -- We add all the transactions in the mempool to the ledger. Some of
       -- them will become invalid because all inputs have been spent.
-      let txsInMempool = map fst snapshotTxs
+      let txsInMempool = map fst $ snapshotTxs' snap
       errs <- atomically $ addTxsToLedger (map txForgetValidated txsInMempool)
 
       -- Sync the mempool with the ledger. Now some of the transactions in the
@@ -855,9 +858,8 @@ withTestMempool setup@TestSetup {..} prop =
                          -> MempoolSnapshot TestBlock TicketNo
                          -> Property
     checkMempoolValidity ledgerState
-                         MempoolSnapshot {
-                             snapshotTxs
-                           , snapshotSlotNo
+                         snap@MempoolSnapshot {
+                             snapshotSlotNo
                            } =
         case runExcept $ repeatedlyM
                (fmap (TickedSimpleLedgerState . convertMapKind . getTickedSimpleLedgerState  . fst) .: applyTx testLedgerConfig DoNotIntervene snapshotSlotNo)
@@ -866,7 +868,7 @@ withTestMempool setup@TestSetup {..} prop =
           Right _ -> property True
           Left  e -> counterexample (mkErrMsg e) $ property False
       where
-        txs = map (txForgetValidated . fst) snapshotTxs
+        txs = map (txForgetValidated . fst) $ snapshotTxs' snap
         mkErrMsg e =
           "At the end of the test, the Mempool contents were invalid: " <>
           show e
@@ -1047,7 +1049,7 @@ prop_Mempool_idx_consistency :: Actions -> Property
 prop_Mempool_idx_consistency (Actions actions) =
     withTestMempool emptyTestSetup $ \testMempool@TestMempool { mempool } ->
       fmap conjoin $ forM actions $ \action -> do
-        txsInMempool      <- map fst . snapshotTxs <$>
+        txsInMempool      <- map fst . snapshotTxs' <$>
                              atomically (getSnapshot mempool)
         actionProp        <- executeAction testMempool action
         currentAssignment <- currentTicketAssignment mempool
@@ -1175,10 +1177,10 @@ executeAction testMempool action = case action of
 currentTicketAssignment :: IOLike m
                         => Mempool m TestBlock TicketNo -> m TicketAssignment
 currentTicketAssignment Mempool { syncWithLedger } = do
-    MempoolSnapshot { snapshotTxs } <- syncWithLedger
+    snap <- syncWithLedger
     return $ Map.fromList
       [ (ticketNo, txId (txForgetValidated tx))
-      | (tx, ticketNo) <- snapshotTxs
+      | (tx, ticketNo) <- snapshotTxs' snap
       ]
 
 instance Arbitrary Actions where
