@@ -536,6 +536,7 @@ querySupportedVersion = \case
     GetPoolState {}                            -> (>= v6)
     GetStakeSnapshots {}                       -> (>= v6)
     GetPoolDistr {}                            -> (>= v6)
+    GetKESConfig                               -> undefined
     -- WARNING: when adding a new query, a new @ShelleyNodeToClientVersionX@
     -- must be added. See #2830 for a template on how to do this.
   where
@@ -636,6 +637,8 @@ encodeShelleyQuery query = case query of
       CBOR.encodeListLen 2 <> CBOR.encodeWord8 20 <> toCBOR poolId
     GetPoolDistr poolids ->
       CBOR.encodeListLen 2 <> CBOR.encodeWord8 21 <> toCBOR poolids
+    GetKESConfig ->
+      CBOR.encodeListLen 1 <> CBOR.encodeWord8 22
 
 decodeShelleyQuery ::
      ShelleyBasedEra era
@@ -696,6 +699,7 @@ encodeShelleyResult query = case query of
     GetPoolState {}                            -> toCBOR
     GetStakeSnapshots {}                       -> toCBOR
     GetPoolDistr {}                            -> toCBOR
+    GetKESConfig                               -> toCBOR
 
 decodeShelleyResult ::
      ShelleyCompatible proto era
@@ -724,6 +728,7 @@ decodeShelleyResult query = case query of
     GetPoolState {}                            -> fromCBOR
     GetStakeSnapshots {}                       -> fromCBOR
     GetPoolDistr {}                            -> fromCBOR
+    GetKESConfig                               -> fromCBOR
 
 -- | The stake snapshot returns information about the mark, set, go ledger snapshots for a pool,
 -- plus the total active stake for each snapshot that can be used in a 'sigma' calculation.
