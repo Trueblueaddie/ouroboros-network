@@ -73,7 +73,7 @@ import qualified Data.VMap as VMap
 
 import           Cardano.Ledger.Crypto (Crypto)
 import           Cardano.Ledger.Serialization (decodeRecordNamed,
-                     utcTimeFromCBOR)
+                     utcTimeFromCBOR, utcTimeToCBOR)
 import           Ouroboros.Consensus.Protocol.Abstract (ChainDepState)
 import           Ouroboros.Consensus.Shelley.Eras (EraCrypto)
 import           Ouroboros.Consensus.Shelley.Ledger.Block
@@ -121,7 +121,11 @@ instance FromCBOR KESConfig where
         kcSystemStart
 
 instance ToCBOR KESConfig where
-  toCBOR = undefined
+  toCBOR KESConfig { kcSlotsPerKESPeriod, kcMaxKESEvolutions, kcSystemStart } =
+    encodeListLen 3
+      <> toCBOR kcSlotsPerKESPeriod
+      <> toCBOR kcMaxKESEvolutions
+      <> utcTimeToCBOR kcSystemStart
 
 data instance BlockQuery (ShelleyBlock proto era) :: Type -> Type where
   GetLedgerTip :: BlockQuery (ShelleyBlock proto era) (Point (ShelleyBlock proto era))
@@ -557,7 +561,7 @@ querySupportedVersion = \case
     GetPoolState {}                            -> (>= v6)
     GetStakeSnapshots {}                       -> (>= v6)
     GetPoolDistr {}                            -> (>= v6)
-    GetKESConfig                               -> undefined
+    GetKESConfig                               -> undefined -- TODO
     -- WARNING: when adding a new query, a new @ShelleyNodeToClientVersionX@
     -- must be added. See #2830 for a template on how to do this.
   where
