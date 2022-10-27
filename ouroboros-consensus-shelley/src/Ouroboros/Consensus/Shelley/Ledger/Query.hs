@@ -57,6 +57,7 @@ import           Ouroboros.Network.Block (Serialised (..), decodePoint,
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.HeaderValidation
+import           Ouroboros.Consensus.Ledger.Extended ()
 import           Ouroboros.Consensus.Ledger.Query hiding (getSystemStart)
 import           Ouroboros.Consensus.Util (ShowProxy (..))
 
@@ -71,6 +72,10 @@ import qualified Cardano.Ledger.Shelley.RewardProvenance as SL
 import qualified Data.VMap as VMap
 
 import           Cardano.Ledger.Crypto (Crypto)
+import           Cardano.Ledger.Serialization (decodeRecordNamed,
+                     utcTimeFromCBOR)
+import           Cardano.Ledger.Shelley.API
+                     (ShelleyGenesis (sgSlotsPerKESPeriod))
 import           Ouroboros.Consensus.Ledger.Extended (ExtLedgerCfg (..))
 import           Ouroboros.Consensus.Protocol.Abstract (ChainDepState)
 import           Ouroboros.Consensus.Shelley.Eras (EraCrypto)
@@ -106,6 +111,20 @@ data KESConfig = KESConfig {
   , kcMaxKESEvolutions  :: Word64
   , kcSystemStart       :: UTCTime
   }
+
+instance FromCBOR KESConfig where
+  fromCBOR = do
+    decodeRecordNamed "KESConfig" (const 3) $ do
+      kcSlotsPerKESPeriod <- fromCBOR
+      kcMaxKESEvolutions <- fromCBOR
+      kcSystemStart <- utcTimeFromCBOR
+      pure $ KESConfig
+        kcSlotsPerKESPeriod
+        kcMaxKESEvolutions
+        kcSystemStart
+
+instance ToCBOR KESConfig where
+  toCBOR = undefined
 
 data instance BlockQuery (ShelleyBlock proto era) :: Type -> Type where
   GetLedgerTip :: BlockQuery (ShelleyBlock proto era) (Point (ShelleyBlock proto era))
