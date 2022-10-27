@@ -17,6 +17,7 @@
 
 module Ouroboros.Consensus.Shelley.Ledger.Query (
     BlockQuery (.., GetUTxO, GetFilteredUTxO)
+  , KESConfig (..)
   , NonMyopicMemberRewards (..)
   , StakeSnapshot (..)
   , StakeSnapshots (..)
@@ -39,13 +40,16 @@ import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import           Data.Time (UTCTime)
 import           Data.Type.Equality (apply)
 import           Data.Typeable (Typeable)
 import           Data.UMap (View (..), domRestrictedView)
 import           GHC.Generics (Generic)
+import           GHC.Word (Word64)
 
 import           Cardano.Binary (FromCBOR (..), ToCBOR (..), encodeListLen,
                      enforceSize)
+import           Cardano.Slotting.Time (getSystemStart)
 
 import           Ouroboros.Network.Block (Serialised (..), decodePoint,
                      encodePoint, mkSerialised)
@@ -53,8 +57,7 @@ import           Ouroboros.Network.Block (Serialised (..), decodePoint,
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.HeaderValidation
-import           Ouroboros.Consensus.Ledger.Extended
-import           Ouroboros.Consensus.Ledger.Query
+import           Ouroboros.Consensus.Ledger.Query hiding (getSystemStart)
 import           Ouroboros.Consensus.Util (ShowProxy (..))
 
 import           Cardano.Ledger.Compactible (Compactible (fromCompact))
@@ -68,6 +71,7 @@ import qualified Cardano.Ledger.Shelley.RewardProvenance as SL
 import qualified Data.VMap as VMap
 
 import           Cardano.Ledger.Crypto (Crypto)
+import           Ouroboros.Consensus.Ledger.Extended (ExtLedgerCfg (..))
 import           Ouroboros.Consensus.Protocol.Abstract (ChainDepState)
 import           Ouroboros.Consensus.Shelley.Eras (EraCrypto)
 import           Ouroboros.Consensus.Shelley.Ledger.Block
@@ -98,6 +102,9 @@ instance Crypto c => Serialise (NonMyopicMemberRewards c) where
   decode = NonMyopicMemberRewards <$> fromCBOR
 
 data KESConfig = KESConfig {
+    kcSlotsPerKESPeriod :: Word64
+  , kcMaxKESEvolutions  :: Word64
+  , kcSystemStart       :: UTCTime
   }
 
 data instance BlockQuery (ShelleyBlock proto era) :: Type -> Type where
@@ -277,9 +284,8 @@ instance (ShelleyCompatible proto era, ProtoCrypto proto ~ crypto) => QueryLedge
           getFilteredDelegationsAndRewardAccounts st creds
         GetKESConfig ->
           getKESConfig cfg
-        -- TODO: Remove
-        -- GetGenesisConfig ->
-        --   shelleyLedgerCompactGenesis lcfg
+        GetGenesisConfig ->
+          compactGenesis $ shelleyGenesis $ topLevelConfigBlock $ getExtLedgerCfg cfg
         DebugNewEpochState ->
           st
         DebugChainDepState ->
@@ -545,7 +551,13 @@ querySupportedVersion = \case
 -------------------------------------------------------------------------------}
 
 getKESConfig :: ExtLedgerCfg (ShelleyBlock proto era) -> KESConfig
-getKESConfig cfg = KESConfig
+getKESConfig (ExtLedgerCfg extLedgerCfg) =
+  let blockCfg = topLevelConfigBlock extLedgerCfg
+  in KESConfig {
+    kcSlotsPerKESPeriod = SL.sgSlotsPerKESPeriod $ shelleyGenesis blockCfg
+  , kcMaxKESEvolutions = SL.sgMaxKESEvolutions $ shelleyGenesis blockCfg
+  , kcSystemStart = getSystemStart $ shelleySystemStart blockCfg
+  }
 
 getProposedPPUpdates ::
      ShelleyBasedEra era
