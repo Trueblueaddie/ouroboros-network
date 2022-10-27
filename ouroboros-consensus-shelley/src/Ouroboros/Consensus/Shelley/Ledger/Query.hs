@@ -57,7 +57,7 @@ import           Ouroboros.Network.Block (Serialised (..), decodePoint,
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.Config
 import           Ouroboros.Consensus.HeaderValidation
-import           Ouroboros.Consensus.Ledger.Extended ()
+import           Ouroboros.Consensus.Ledger.Extended
 import           Ouroboros.Consensus.Ledger.Query hiding (getSystemStart)
 import           Ouroboros.Consensus.Util (ShowProxy (..))
 
@@ -74,9 +74,6 @@ import qualified Data.VMap as VMap
 import           Cardano.Ledger.Crypto (Crypto)
 import           Cardano.Ledger.Serialization (decodeRecordNamed,
                      utcTimeFromCBOR)
-import           Cardano.Ledger.Shelley.API
-                     (ShelleyGenesis (sgSlotsPerKESPeriod))
-import           Ouroboros.Consensus.Ledger.Extended (ExtLedgerCfg (..))
 import           Ouroboros.Consensus.Protocol.Abstract (ChainDepState)
 import           Ouroboros.Consensus.Shelley.Eras (EraCrypto)
 import           Ouroboros.Consensus.Shelley.Ledger.Block
@@ -110,7 +107,7 @@ data KESConfig = KESConfig {
     kcSlotsPerKESPeriod :: Word64
   , kcMaxKESEvolutions  :: Word64
   , kcSystemStart       :: UTCTime
-  }
+  } deriving (Eq, Show)
 
 instance FromCBOR KESConfig where
   fromCBOR = do
@@ -501,6 +498,10 @@ instance SameDepIndex (BlockQuery (ShelleyBlock proto era)) where
     = Nothing
   sameDepIndex (GetPoolDistr _) _
     = Nothing
+  sameDepIndex GetKESConfig GetKESConfig
+    = Just Refl
+  sameDepIndex GetKESConfig _
+    = Nothing
 
 deriving instance Eq   (BlockQuery (ShelleyBlock proto era) result)
 deriving instance Show (BlockQuery (ShelleyBlock proto era) result)
@@ -529,6 +530,7 @@ instance ShelleyCompatible proto era => ShowQuery (BlockQuery (ShelleyBlock prot
       GetPoolState {}                            -> show
       GetStakeSnapshots {}                       -> show
       GetPoolDistr {}                            -> show
+      GetKESConfig                               -> show
 
 -- | Is the given query supported by the given 'ShelleyNodeToClientVersion'?
 querySupportedVersion :: BlockQuery (ShelleyBlock proto era) result -> ShelleyNodeToClientVersion -> Bool
