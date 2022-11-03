@@ -39,17 +39,41 @@ packages: ./ouroboros-network-testing
           ./ntp-client
           ./cardano-client
 
+tests: True
+
+package io-classes
+  flags: +asserts
+
+package strict-stm
+  flags: +asserts
+
+package network-mux
+  flags: +asserts
+
+package ouroboros-network
+  flags: +asserts +cddl
+
+package ouroboros-consensus
+  flags: +asserts
+
+package ouroboros-consensus-mock
+  flags: +asserts
+
+package ouroboros-consensus-byron
+  flags: +asserts
+
+package ouroboros-consensus-shelley
+  flags: +asserts
+
+package ouroboros-consensus-cardano
+  flags: +asserts
+
 constraints:
     ip < 1.5
   , hedgehog >= 1.0
   , bimap >= 0.4.0
   , ListLike >= 4.7.3
   , witherable >= 0.4
-
-tests: True
-
-allow-newer:
-  size-based:template-haskell
 
 constraints:
   -- CONSTRAINTS FOR UPSTREAM CARDANO PACKAGES
