@@ -69,12 +69,6 @@ package ouroboros-consensus-cardano
   flags: +asserts
 
 constraints:
-    ip < 1.5
-  , hedgehog >= 1.0
-  , ListLike >= 4.7.3
-  , witherable >= 0.4
-
-constraints:
   -- CONSTRAINTS FOR UPSTREAM CARDANO PACKAGES
   -- These should all be constraints in upstream packages, but are currently missing.
   -- We should a) fix these upstream and b) revise the constraints on the released
