@@ -66,8 +66,10 @@ Note that `cabal` itself keeps track of what index states it knows about, so
 when you bump the pinned index state you may need call `cabal update` in
 order for `cabal` to be happy.
 
-The Nix code which builds our packages also cares about the index state.
-This is represented by inputs managed by `niv`:
+The Nix code which builds our packages also needs some information relating 
+to the index-state. This needs to be new enough to include the index-state
+specified in `cabal.project`. The information is represented by inputs 
+managed by `niv`:
 You can update these by running:
 - `niv update hackage.nix` for Hackage
 - `niv update cardano-haskell-packages` for CHaP
