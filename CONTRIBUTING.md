@@ -51,7 +51,7 @@ Our Haskell packages come from two package repositories:
 - [CHaP](https://github.com/input-output-hk/cardano-haskell-packages) (which is essentially another Hackage)
 
 The "index state" of each repository is pinned to a particular time in
-`cabal.project`.  This tells Cabal to treat the repository "as if" it was
+`cabal.project`.  This tells Cabal to treat the repository as if it was
 the specified time, ensuring reproducibility.  If you want to use a package
 version from repository X which was added after the pinned index state
 time, you need to bump the index state for X.  This is not a big deal,
@@ -80,18 +80,19 @@ error: Unknown index-state 2021-08-08T00:00:00Z, the latest index-state I know a
 ### Use of `source-repository-package`s
 
 We *can* use Cabal's `source-repository-package` mechanism to pull in
-un-released package versions. However, we should try and avoid this.  In
-particular, we should not release our packages to CHaP while we depend on a
-`source-repository-package`.
+un-released package versions. This can be useful when debugging/developing
+across different repositories. However, we should not release our packages
+to CHaP while we depend on a `source-repository-package` since downstream
+consumers would not be able to build such package.
 
 If we are stuck in a situation where we need a long-running fork of a
 package, we should release it to CHaP instead (see the
 https://github.com/input-output-hk/cardano-haskell-packages[CHaP README]
 for more).
 
-If you do add a `source-repository-package`, you need to provide a
-`--sha256` comment in `cabal.project` so that Nix knows the hash of the
-content. There are two relatively straightforward ways to do this:
+If you do add a temporary `source-repository-package` stanza, you need to
+provide a `--sha256` comment in `cabal.project` so that Nix knows the hash
+of the content. There are two relatively straightforward ways to do this:
 
 1. The TOFU approach: put in the wrong hash and then Nix will tell you the correct one, which you can copy in.
 2. Calculate the hash with `nix-shell -p nix-prefetch-git --run 'nix-prefetch-git <URL> <COMMIT_HASH>'`

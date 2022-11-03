@@ -54,9 +54,10 @@ allow-newer:
 constraints:
   -- CONSTRAINTS FOR UPSTREAM CARDANO PACKAGES
   -- These should all be constraints in upstream packages, but are currently missing.
-  -- We should a) fix these upstream and b) revise the constraints  on the released
-  -- version in CHaP. Unfortunately revisions in CHaP don't work yet, revisit this
-  -- when we fix it.
+  -- We should a) fix these upstream and b) revise the constraints on the released
+  -- version in CHaP.
+  -- TODO Unfortunately revisions in CHaP don't work yet, revisit this when we fix it.
+  -- See https://github.com/input-output-hk/haskell.nix/issues/1675
 
   -- bizarre issue: in earlier versions they define their own 'GEq', in newer
   -- ones they reuse the one from 'some', but there isn't e.g. a proper version
